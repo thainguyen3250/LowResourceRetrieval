@@ -1,0 +1,13 @@
+torch
+sentence-transformers
+rank-bm25
+transformers
+py-vncorenlp
+numpy
+scipy
+matplotlib
+POT
+pandas
+fastparquet
+dotenv
+dataset

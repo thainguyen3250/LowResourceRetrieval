@@ -1,0 +1,1618 @@
+================================================================================
+Chapter 4 - Proposed Approach
+================================================================================
+
+--- Page 64 ---
+Chapter 4
+Proposed Approach
+In this chapter, we will present our approach to the problem of information retrieval in
+low-resource languages. We will first present the pipeline for training and describe the
+components in the pipeline to provide a general view of how the components work and
+interact with each other. From there, we will present the architecture of the model we
+propose.
+4.1
+Problem Statement
+Developing an information retrieval system for low-resource languages presents several
+technical hurdles, particularly when constructing a semantically accurate model with lim-
+ited training data. While one might consider translation-based approaches where queries
+or documents are translated into a high-resource language such as English, this strategy
+introduces several issues: poor translation quality for LRLs, semantic drift when translat-
+ing from culturally rich contexts, and importantly, translating documents to high-resource
+languages creates a tendency to marginalize the original language, discouraging documents
+from continue to be written in that language. This undermines long-term language and
+culture preservation aim of the project.
+To address these issues, this project approaches in an alternative direction: designing
+an IR model that operates directly within the low-resource language, without relying on
+translation. By employing techniques such as knowledge distillation and query expansion,
+the system transfers understanding from a high-resource model and learns to perform
+retrieval in low-resource settings without relying on large manually labeled corpora. These
+design choices allow the model to better capture the linguistic and cultural nuances of
+the target languages, making retrieval more relevant and empowering continued digital
+engagement in underrepresented language communities.
+63
+
+--- Page 65 ---
+4.2
+Training Pipeline
+Figure 4.1: Pipeline for training process
+Figure 4.1 provides an overview of the components in the pipeline and their execution
+flow. As can be seen in the figure, the pipeline consists of two major parts: the knowledge
+distillation part, and the training part for mono-lingual information retrieval.
+As mentioned in [25], the aim of knowledge distillation is to extend existing sentence
+embedding models to new languages, which help us to create multilingual versions from
+previously monolingual models. In [25], they use mean-squared loss function during train-
+ing. Here, we decided to experiment with a different approach for training, which is to
+use the optimal transport distillation. This is the approach presented in [40]. We will
+describe this approach in detail in the Subsection 4.2.1.
+After the knowledge distillation part, we should obtain a language model that is ex-
+pected to be good enough to encode the information of a sentence in the language of the
+student model. We will then use this trained model for the mono-lingual information re-
+trieval training process. In the mono-lingual information retrieval training part, we build
+our pipeline based on the idea of using both lexical matching and semantic searching
+which was mention in [24], combined with the use of query expansion component and
+some adjustments related to the similarity scoring process between query and documents.
+The execution flow goes through the following steps:
+1. First, the queries in the query-document dataset along with the documents in the
+64
+
+--- Page 66 ---
+document corpus, which are usually stored in raw text, go through preprocessing.
+This process includes steps such as striping extra spaces, stemming, stop-word re-
+moving, words and sentences segmentating, and tokenizing. The result of this step
+will be documents and queries that have been processed and saved in a form more
+suitable for training. For documents that are marked as relevant documents for each
+query in the query-document dataset, they will be used to determine positive samples
+for training.
+2. After preprocessing, for each sample in the query-document set, the query is passed to
+the query expansion component. The goal of this component is to create an extended
+query with more terms, thereby increasing the ability to match more documents
+when performing lexical matching. A detailed description for this query expansion
+component will be presented later in the Subsection 4.2.2.
+3. With the newly obtained expanded query, both the original query and the expanded
+query are then passed independently into the lexical matching component.
+This
+component will calculate the lexical similarity between the query and each document
+in the document corpus. The result of this step will be a list with each element being
+the lexical similarity score between the query and each document in the document
+corpus, sorted in descending order for convenience of subsequent components. We
+will talk more about this component in the Subsection 4.2.3.
+4. The following step after lexical matching is the document chunking step. In the
+approach mentioned in [24], they just concatenate the title and content of each
+article in the legal corpus into one ”very long” sentence. While they do mention the
+percentage of articles based on length, they do not mention how to handle articles
+with word counts exceeding the model’s limit, nor do they mention splitting the
+articles. Meanwhile, we argue that for documents of different lengths, longer lengths
+may either provide more details relevant to the query, or may contain more irrelevant
+content and reduce the relevance and usefulness of the document. Within the same
+document, some parts may be more relevant to the query than others, and the parts
+that are truly relevant to the query may be distributed in later positions of the
+document. Therefore, we believe that seperating the document into small chunks,
+calculating the query relevance to each chunk, and then combining them may help
+solve the above problems.
+5. Along with the sample preparation process, similar to [24], we can perform the
+fine-tuning process of the language model before using this model for the semantic
+similarity process. Normally, with languages with few resources such as Khmer, we
+will rarely have a language model optimized specifically for that language but often
+65
+
+--- Page 67 ---
+have to use multilingual models (such as mBERT, XLM-R, ...). Therefore, fine-tuning
+these multilingual models to make them more compatible with the language we want
+to use is necessary. In addition, similar to [24], if we target the model to documents
+belonging to a few specific topics (like in [24] is legal documents), we can also fine-
+tuning to make the model more compatible. However, in our current approach this
+step is optional, since we have already used a student model that has been distilled
+from a teacher model which is already effective in representing semantics, and also
+sometimes the language used already has a good enough native language model, or
+the document topic is so broad that fine-tuning may lead to overfitting. In [24], they
+use the legal corpus to fine-tune masked language modeling (MLM) the language
+model. Referring to our case, it is similar that we will use the document corpus to
+MLM fine-tuning the language model. Then we use the fine-tuned model as the base
+model for the semantic searching step. If we don’t do fine-tuning, we can directly
+use the language model as the base model.
+6. Finally, for each query and list of documents selected as samples (each document has
+been divided into chunks), they will be passed into the semantic searching training
+loop.
+The main component of this step is the Sentence Transformer model [21],
+which will help us calculate the relevance between the query and each chunk in each
+document. Description of how this and other components work will be presented in
+the Subsection 4.2.4.
+4.2.1
+Knowledge Distillation
+In this first component, we aim to transfer that rich knowledge of a teacher Sentence
+Transformer model to the student model so that we can obtain a student Sentence Trans-
+former that can encode semantic information of a sentence better for the other languages.
+By utilizing this component, we enhance the student model by helping it learning the
+way semantic meaning is represented in the teacher model, which is usually more eﬀicient
+due to being trained on a larger dataset. As a result, it help improve the performance of
+the student model which often performs poorly due to lack of training resources. Also, as
+state in [40], the distillation training only needs to focus on the translation knowledge as
+a general textual encoder, so we can use bitext data to train the student query encoder,
+which is more feasible for low resource languages. The execution flow of this component
+is as follows:
+66
+
+--- Page 68 ---
+Figure 4.2: Execution flow of the Knowledge Distillation component
+1. First, we need parallel data of sentences in the source language, the language that
+was used for training in the monolingual retrieval phase, and in the target language
+in which we need to distill knowledge. For each pair of parallel sentences (s, t), s
+will be fed into the teacher model, while t will be fed into the student model. The
+teacher and student Sentence Transformers will then calculate token embeddings of
+the tokens of the sentences passed into them. We denote E(.) and ˆE(.) the token
+embeddings of the teacher and student models, respectively.
+2. As stated in the purpose of this component, we need to ensure that tokens that are
+translation of each other should have similar embeddings, i.e, for a token si and its
+translation token tj, we should have E(si) ≈ˆE(tj). In other words, we first find a
+mapping f that maps a token in s with its corresponding token that has the same
+meaning in t, then we minimize the average cosine distance between each mapped
+pair. In order to achieve this, we will use the same approach as in proposed [40]. We
+view this problem as an Optimal Transport problem. We consider each sentence to
+be a distribution of tokens, the mapping f to be the transportation plan, and the
+distance that needs minimizing to be the transportation cost. To elaborate further,
+we assign mass to the tokens by considering each token to contain a proportion of
+the whole sentence’s meaning. This part is also where our approach differs from
+that mentioned in [40], which consider the token distribution to be uniform. As
+sentences are tokenized differently in different languages, one token in a language
+may correspond to more than one tokens in another language.
+Therefore, if we
+consider tokens to have the same mass, we cannot find a transportation plan that
+maps the tokens correctly. Thus, to capture the semantic importance of each token in
+s and t, we define a source distribution, µs, on s and a uniform target distribution,
+67
+
+--- Page 69 ---
+µt, on t, both of which is based on the tf −idf scores of the tokens.
+That is:
+µs(i) = tf −idf(si, s, S) and µt(j) = tf −idf(tj, t, T) where S and T are the set of
+source sentences and target sentences respectively. By using tf −idf score, we can
+assign tokens that are semantically important with higher mass, allowing them to be
+mapped to many tokens with lower mass.
+The set of transportation plans between these two distributions is then the set of
+doubly stochastic matrices P defined as
+P = {γ ∈(R+)m×n|γ1n = µs, γT1m = µt}.
+where m and n respectively are the number of tokens in the source sentence and
+target sentence, 1m is a m-dimensional vector of ones, and γ is a transportation
+plan. Then the computation of the initial distance become the optimal transport
+problem:
+γ0 = argmin
+γ∈P
+⟨γ, C⟩F
+.
+where ⟨·, ·⟩F is the Frobenius inner product, i.e. the sum of the matrices’ elementwise
+products, γ0 is the optimal transportation plan and C is a m × n cost matrix with
+Cij being the cost of moving the mass from si to tj. In the context of this project,
+the chosen cost is the cosine distance between two tokens, or in other words, the
+difference in meanings of two tokens:
+Cij = 1 −E(si). ˆE(tj)
+.
+3. With the problem redefined, our goal now is to minimize the total transportation
+cost, which is also chosen as the loss function for training the student model. In
+general, since this is a linear programming problem, we can solve it with O((m+n)3)
+complexity. When m and n increases, the algorithm becomes intractable. Thus, we
+use the Inexact Proximal point method for Optimal Transport (IPOT) [37], of which
+the solution has been discussed in Subsection 3.5.2. As has been stated in Subsection
+3.5.2, the complexity of IPOT is similar to that of Sinkhorn, which is O(k(m + n)2),
+thus reducing the time needed to find the solution, and further, the training time.
+Minimizing the loss for each pair of parallel sentence will prompts the student model
+to learn to reduce the distance between its and the teacher’s embeddings.
+68
+
+--- Page 70 ---
+4.2.2
+Query Expansion
+As mentioned in the Related Works chapter, PRF [2] [19] is an eﬀicient query expansion
+method that relies only on the query itself and the document corpus, does not require
+user feedback, and can be applied to all languages regardless of language characteristics.
+Several variations of PRF have been created to improve this technique, including using
+expectation maximization technique to extract expansion terms from the initially retrieved
+top k documents [35] [38], recognizing and assigning different weights to parts of the
+document [34] [35], or using the help of a resource-rich language [4] [5] [35].
+In our current proposed model and pipeline, we will not use the approach of using the
+help of a resource-rich language. There are two main reasons for this decision:
+The first reason is the difference in the importance of this component. The approaches
+in the cited papers use PRF and query expansion as the main steps in the information
+retrieval process, so they need to focus on this step. Meanwhile, our approach considers the
+query expansion component as a supporting step, which helps to match more documents
+in the lexical similarity step and avoids the possibility of missing relevant documents.
+Therefore, we want to design this component to work more simply to focus on the next
+steps.
+The second reason is about the performance of the model and pipeline. As mentioned
+in the first reason, we aim for this component to be a support component, so we want it to
+run faster so that we can focus on the following steps. Not using additional support from
+another language will help avoid the additional time needed to translate queries from the
+original language to the resource-rich language, perform resource-rich query expansion,
+and combine the results of both languages. We will also avoid being dependent on the
+translation model, and also avoid the need for additional datasets in the resource-rich
+language.
+For the two reasons mentioned above, we decided to choose an approach that focused
+on the first two variants. We finally design our query expansion component as a variation
+of a technique mentioned in [35], which is UnifiedStructPRF. The image below shows the
+architecture and execution flow of this component:
+Figure 4.3: Architecture and execution flow of Query Expansion component
+The flow of this component is as follows:
+69
+
+--- Page 71 ---
+At the beginning, the original query and the documents in the document set are fed
+into the retrieval model. This component performs a relevance ranking between the query
+and the documents, in order to select potential documents to use in the next step. In the
+approach presented in [35], they generated a language model θD for each document D in
+the collection and language model θQ for each query Q, then use KL-divergence (DKL)
+metric to measure the similarity between θQ and θD. The more relevance of D, the less
+is DKL.
+However, in our approach we do not use this method. There are two reasons for our
+decision. First, as defined in [27], a statistical language model is a probability distribution
+over all possible sentences or spoken utterances, documents, or any other linguistic unit.
+This means that creating a language model for each query and document is the process of
+finding the right parameters for the probability distribution of each query and document.
+This will increase the time required for the computation, which is something we want to
+avoid. Second, in the lexical similarity step that follows this query expansion step, we
+used BM25+ ranking function to calculate the similarity score between the query and the
+documents to rank them. Therefore, to ensure consistency, we decided to use BM25+ for
+this step. In the implementation, we use BM25+ provided by the rank_bm25 library,
+which implements the formula presented in [33] as follows:
+rsvq =
+X
+t∈q
+log(N + 1
+dft
+) · (
+(k1 + 1) · tftd
+k1 · ((1 −b) + b · ( Ld
+Lavg )) + tftd
++ δ),
+with q is the given query and rsvq, which is calculated by the sum of individual term
+t, is the retrieval status value for q. N is the number of documents, dft is the number
+of documents containing the term (the document frequency), tftd is the number of times
+term t occurs in document d. Ld is the length of the document (in terms) and Lavg is the
+mean of the document lengths. b and k1 are two tuning parameters, while δ is a positive
+constant added to the tftd component before multiplying.
+After going through the retrieval model, we will get a list of ranked relevance of each
+document to the query. At this point, we will select the k most relevant documents,
+extract all the terms in these k documents. In [35], they call this the relevant set. Terms
+in relevant set will be our potential expansion terms, and in the next step, we will calculate
+to choose the words to use to expand the query. Along with that, all the words in all the
+documents are also extracted, and is called the collection set. Both of these sets will be
+used in the next step.
+In this step, we will follow the approach mentioned in [35], which is to use a customize
+version of the EM algorithm proposed in [38]. As presented in [35], EM algorithm is a
+process of iteratively assigning a probability to expansion terms. In each iteration, the
+probability of the terms which uniquely represent the relevant set is increased while prob-
+70
+
+--- Page 72 ---
+ability of other terms are decreased. Thus, yielding the representative terms of relevant
+set. In the basic version proposed in [38], all part of the document have the same contri-
+bution to the expansion terms, while in [35], they argue that each part of the document
+contributes to the expansion terms with different importance. In [35], they state that a
+title precisely represents the document, whereas the body of the document is more generic
+in nature, elaborating the title, as it were. Hence, expansion terms from the title are more
+important than the terms from the body of the document. We agreed with their point of
+view, and therefore we decided to use the approach they proposed.
+The interpretation for the notations used in the formulas of [35] is as follows:
+• N = observation sequence; all terms from relevant set.
+• M = sources; relevant set (title) RT , relevant set (body) RB, collection set (title)
+CT and collection set (body) CB.
+• L = outcome; all terms from collection.
+• Pjk is the probability that the kth expansion term uniquely represents jth source.
+• πj is the probability of selecting jth source.
+• Xik is the indicator variable representing whether the ith term from the observation
+is same as the kth expansion term or not.
+• Zij is the hidden variable representing whether the source of ith term is j or not.
+With this notation, what we need the EM algorithm to boost are PRT k and PRBk, which
+are the probability of a term k uniquely representing relevant set’s title and body. Paper
+[35] estimates L(θ), the likelihood of all the terms from relevant set being expansion terms
+in terms of marginal likelihood of the observed data (Xik and Zij), with the equation as
+follows:
+L(θ) =
+N
+Y
+i=1
+M
+Y
+j=1
+(πj ·
+L
+Y
+k=1
+P Xik
+jk )Zij.
+(4.1)
+We can deduce (4.1) as follows:
+1. From the interpretation of the equation’s notation, Xik is the indicator variable
+representing whether the ith term from the observation is same as the kth expansion
+term or not. This is something we can check and get a definite result by simply
+comparing whether term i is similar to term k, so we can conclude that Xik is an
+observable variable. Meanwhile, for any expansion term i in the relavant set, whether
+it originates from source j or not is something we cannot aﬀirm with certainty, so
+we consider this as a latent variable.
+71
+
+--- Page 73 ---
+2. Now, we call f is the probability density function of a term i uniquely representing
+a source j. To ensure the generality of the function for all available observation
+sequences N and sources M, we will consider all terms k in the collection L, and call
+Pjk is the probability that word k represents source j.
+Note that, if term k in the collection is different from term i, that is, term k is not
+in our relevance set, then we are not interested in maximizing the probability that
+term k represents source j. We are only interested in the probability when k equals
+i, which means the probability that term k represents source j is also the probability
+that word i represents source j. The function f will now have the form:
+f(i, j, k, Pjk) =
+(
+Pjk, i = k,
+0, i ̸= k,
+∀k = 1, 2, ..., L .
+3. With Xik is the indicator variable, we can construct the function f simply as follows:
+f(i, j, Xik, Pjk) =
+L
+Y
+k=1
+P Xik
+jk
+It can be seen that when i is different from k, Xik is 0, meaning the power in the
+expression of the product series will be to the power 0, the result is 1 and does
+not contribute anything to the product series. Only when i is k, Xik is 1, then the
+power in the expression of the product series will be to the power 1 and equal to the
+probability itself, at this time it will contribute to the final result.
+4. With f is the probability density function representing that a term i represents a
+single source j, we will now compute it for all the sources for term i, which is the
+entire relevant set. Let Li be this probability. Once again, to ensure the generality
+of the function for all available observation sequences N, we will consider all sources
+j in M.
+Same as above, if source j in M is not the origin of term i, then we are not interested
+in estimating the probability that term i belongs to source j. We are only interested
+in the probability when source j in M is not the origin of term i. For each source
+j, the probability of choosing source j, which is also the importance of source j in
+contributing to the relevant set, is also different, and the final total probability will
+therefore be an expected value according to this probability. So, the function Li will
+now have the form:
+Li(i, j, πj, Xik, Pjk) =
+(
+πj · f(i, j, Xik), source(i) = j,
+0, source(i) ̸= j,
+∀j = 1, 2, ..., M .
+72
+
+--- Page 74 ---
+5. With Zij is the latent variable representing whether the source of ith term is j or
+not, we can construct the function Li simply as follows:
+f(i, πj, Zij, Xik, Pjk) =
+M
+Y
+j=1
+(πj ·
+L
+Y
+k=1
+P Xik
+jk )Zij.
+Similar to step 3, it can be seen that when source(i) is not from j, Zij is 0, meaning
+the power in the expression of the product series will be to the power 0, the result is
+1 and does not contribute anything to the product series. Only when source(i) is j,
+Zij is 1, then the power in the expression of the product series will be to the power
+1 and equal to the expression itself, at this time it will contribute to the final result.
+6. Finally, with the probability for each term i in N, to calculate the likelihood of all
+the terms from relevant set being expansion terms, we just need to multiply all the
+probabilities of each term together:
+L(πj, Zij, Xik, Pjk) =
+N
+Y
+i=1
+M
+Y
+j=1
+(πj ·
+L
+Y
+k=1
+P Xik
+jk )Zij.
+Set θ = (πj, Zij, Xik, Pjk), we receive the equation (4.1) above.
+Now, for ease of calculation, we take the log of the expression to get the log likelihood:
+LL(θ) =
+N
+X
+i=1
+M
+X
+j=1
+E(zij)
+ 
+log(πj) +
+L
+X
+k=1
+Xik log(Pjk)
+!
+.
+(4.2)
+From the notations defined above, we can derive two constraints: PM
+j=1 πj = 1 (the sum
+of the probabilities of choosing a source j in all sources is equal to 1) and PL
+k=1 Pjk = 1
+(the sum of the probabilities that a term k in the collection represents source j is equal
+to 1). To solve the optimization problem of maximizing (4.2) to obtain the equations for
+PRT k and PRBk, we will use the Lagrange multiplier α and β with the two constraints just
+mentioned. We will obtain the maximum log likelihood expression as follows:
+MLE = LL(θ) −α · (
+M
+X
+j=1
+πj −1) −β · (
+L
+X
+k=1
+Pjk −1).
+(4.3)
+In the maximization step (M step), from (4.3) we can obtain the expressions for πj và
+Pjk by partially differentiating MLE with respect to πj và Pjk respectively. In [35], the
+two equations are defined as follows:
+73
+
+--- Page 75 ---
+πj =
+PN
+i=1 E(Zij)
+PN
+i=1
+PM
+j=1 E(Zij)
+,
+(4.4)
+Pjk =
+PN
+i=1 xik · E(zij)
+PN
+i=1
+PL
+k=1 xik · E(zij)
+.
+(4.5)
+The proof process for equations (4.4) and (4.5) is as follows:
+Proof for (4.4):
+1. For each value j, rewrite MLE and LL(θ) in terms of πj:
+LL(θ) =
+N
+X
+i=1
+E(zij) · log(πj) +
+N
+X
+i=1
+M
+X
+k=1,k̸=j
+E(zik)
+ 
+log(πk) +
+L
+X
+ℓ=1
+Xiℓlog(Pkℓ)
+!
+|
+{z
+}
+Not depend on πj
+,
+MLE = LL(θ) −απj + α −α
+ 
+M
+X
+i=1,i̸=j
+πi −1
+!
+−β
+ L
+X
+k=1
+Pjk −1
+!
+|
+{z
+}
+Not depend on πj
+.
+2. Partially differentiating LL(θ) and MLE with respect to πj:
+∂LL(θ)
+∂πj
+=
+PN
+i=1 E(zij)
+πj
+,
+∂MLE
+∂πj
+= ∂LL(θ)
+∂πj
+−α =
+PN
+i=1 E(zij)
+πj
+−α.
+3. With ∂MLE
+∂πj
+= 0, we have
+πj =
+PN
+i=1 E(zij)
+α
+∀j = 1, 2, ..., M.
+Simultaneously, we have the constraint presented above: PM
+j=1 πj = 1. From these,
+we deduce that
+M
+X
+j=1
+PN
+i=1 E(zij)
+α
+= 1 ⇔α =
+M
+X
+j=1
+N
+X
+i=1
+E(zij) =
+N
+X
+i=1
+M
+X
+j=1
+E(zij).
+4. From α, we can calculate πj by substituting α into πj equation in step 3. We get the
+same result as (4.4) which we need to prove:
+74
+
+--- Page 76 ---
+πj =
+PN
+i=1 E(zij)
+α
+=
+PN
+i=1 E(Zij)
+PN
+i=1
+PM
+j=1 E(Zij)
+.
+Proof of (4.5):
+1. Similar to the proof for (4.4), for each value j, k we rewrite MLE and LL(θ) in
+terms of Pjk, then, by partially differentiating LL(θ) and MLE with respect to Pjk,
+we got:
+∂LL(θ)
+∂Pjk
+=
+PN
+i=1 E(zij)Xik
+Pjk
+,
+∂MLE
+∂Pjk
+= ∂LL(θ)
+∂Pjk
+−β =
+PN
+i=1 E(zij)Xik
+Pjk
+−β.
+2. With ∂LL(θ)
+∂Pjk
+= 0, we have
+Pjk =
+PN
+i=1 E(zij)Xik
+β
+∀j = 1, 2, ..., M.
+Simultaneously, we have the constraint presented above:PL
+k=1 Pjk = 1. From these,
+we deduce that
+L
+X
+k=1
+PN
+i=1 E(zij)Xik
+β
+= 1 ⇔β =
+L
+X
+k=1
+N
+X
+i=1
+E(zij)Xik =
+N
+X
+i=1
+L
+X
+k=1
+E(zij)Xik.
+3. From β, we can calculate Pjk by substituting β into Pjk equation in Step 2. We get
+the same result as (4.5) which we need to prove:
+Pjk =
+PN
+i=1 E(zij)Xik
+β
+=
+PN
+i=1 E(zij)Xik
+PN
+i=1
+PL
+k=1 E(zij)Xik
+.
+In the expectation step (E step), we will use the just-computed values of πj and Pjk to
+compute a better estimate for the hidden variable Zij (Xik is an indicator variable, and as
+we mentioned in the proof of (4.1), we can obtain exact value and no need to estimate).
+The paper [35] estimates this value as follows:
+E(zij) =
+πj · QL
+k=1 P xik
+jk
+PM
+j=1(πj · QL
+k=1 P xik
+jk )
+.
+(4.6)
+Following the EM algorithm, after each log-likelihood calculation, this value will be
+compared with the log-likelihood value of the previous iteration.
+The algorithm will
+stop when the current log-likelihood value increases less than a preset threshold value.
+75
+
+--- Page 77 ---
+Or to define it mathematically, call θt is the parameters of the log-likelihood function
+LL(θt) at the tth iteration, and ϵ is the preset threshold, the algorithm will stop when
+LL(θt) ≤LL(θt−1) + ϵ. If this condition is not satisfied, a new iteration will start with
+the expectation and maximization step performed, to yield a new log-likelihood value for
+comparison next time.
+When the algorithm stops, we will have two probability lists where each term repre-
+sents each source RT and RB. From here, we select a number of terms with the highest
+probability from each list, combine them, and remove duplicate terms and terms that are
+already in the original query, to obtain the final expanded terms list. We simply add
+these terms to the original query to get the expanded query.
+4.2.3
+Lexical Matching
+As mentioned in Section 4.2, the goal of this step is to calculate the lexical similarity
+between the query and each document in the document corpus, in order to identify doc-
+uments with high similarity to be used as samples for the following steps. The execution
+flow in this step is as follows:
+Figure 4.4: Execution flow of Lexical Matching component
+1. Firstly, after the query expansion step mentioned in Subsection 4.2.2, we get an ex-
+tended query. Together with the normal (unextended) query, both queries are passed
+independently to the lexical matching component. This component will calculate the
+lexical similarity score between the query and each document in the corpus, using
+the BM25+ formula mentioned in Subsection 4.2.2. Since we passed the two queries
+independently, we will get two separate lists for each type of query, with each ele-
+ment in the list being the lexical similarity between the query and the corresponding
+document, sorted in descending order.
+2. In the next step, similar to the approach in [24], positive and negative samples will be
+generated to train the semantic similarity search model through contrastive learning.
+There will be a positive and negative sample generator component that will take care
+of this, which will sit right after the lexical matching component, and take in the
+lexical similarity score list for each query independently. As mentioned in Section 4.2,
+the documents marked as relevant for each query are used to identify positive samples.
+76
+
+--- Page 78 ---
+For negative samples, similar to [24], we will take k documents that are not in the
+positive sample set and have the highest similarity score in the previous training
+round result (in this case it will be the top-k highest lexical similarity scores). Because
+we pass both the original query and the extended query independently into this
+component, we will get two separate sample lists with potentially different negative
+samples and different similarity score values for each sample.
+3. The two sample lists are then combined. Since we pass two queries independently,
+and the expanded query has some additional words added to the query, there are
+two problems that need to be solved during the merging process:
+• First, the same document but the similarity score in the two lists of the two
+queries will be different, due to the increased frequency of some terms in the
+expanded query, leading to different scores when applying BM25+.
+• Second, the ranking of the same document may also be different in the two lists,
+due to the appearance of new documents when using the extended query.
+To solve the first problem, we scale the similarity score in each list to the range (0,1].
+We then apply Min-Max Scaling with Positive Range formula
+x
+′
+i =
+xi −min(x)
+max(x) −min(x) · (b −a) + a, a > 0, b > a.
+We chose this formula for several reasons: first, the similarity scores between a
+document and a query are independent of other documents, and these scores do not
+follow any probability distribution. Secondly, it is easy to implement and ensures
+all values fall within the same positive range, no element is zero after scaling. And
+thirdly, it can be applied independently to each list, the scaling is based only on the
+characteristics of each list, which is consistent with the fact that we are passing two
+queries independently.
+For the second problem, we just simply included all documents appear in both list.
+If the same document appears as a sample in both lists, our current strategy is to
+keep the higher score and discard the lower one. We can represent this strategy
+mathematically as follows:
+Let the two lists of similarity score for normal query (N) and extended query (E)
+be:
+N = {(d1, s1), (d2, s2), . . . , (dn, sn)},
+E = {(d′
+1, s′
+1), (d′
+2, s′
+2), . . . , (d′
+m, s′
+m)}.
+77
+
+--- Page 79 ---
+Where diand d
+′
+i represent the documents, and siand s
+′
+i represent the corresponding
+similarity scores.
+Define the combined list C as:
+C = {(d, s) : d ∈DN ∪DE, s = max(sN, sE)},
+where
+DN = {di : (di, si) ∈N},
+DE = {d′
+i : (d′
+i, s′
+i) ∈E}.
+The values sN and sE are defined as
+sN =
+
+
+
+si,
+if (d, si) ∈N,
+−∞,
+if d /∈N,
+sE =
+
+
+
+s′
+i,
+if (d, s′
+i) ∈B,
+−∞,
+if d /∈B.
+Thus, for each d ∈DN ∪DE, the value s is determined as:
+s =
+
+
+
+
+
+
+
+
+
+sA,
+if d ∈DN and d /∈DE,
+sB,
+if d ∈DE and d /∈DN,
+max(sA, sB),
+if d ∈DN ∩DE.
+The main reason for this strategy is that the similarity between the original query and
+the documents should always be given the highest priority, since the original query
+most accurately reflects what the user input.
+If strategies such as adding scores
+between the two lists or passing these values through a hidden layer are applied, the
+similarity of the expanded query will likely influence the final score of the sample.
+Another reason is that this approach avoids the need to train additional parameters
+that would be required if using a hidden layer, so the training time of the pipeline
+may be reduced.
+4.2.4
+Semantic Searching
+In this step, we will train a model that determines the semantic similarity between the
+query and the documents. The input to the training process will come from the previous
+steps, including: a normal query (no extend), a language model (with or without fine-
+tuning) as a base model, and a list of documents that have been selected as test samples
+after the lexical matching step, each document has been chunked. Based on the approach
+78
+
+--- Page 80 ---
+mentioned in [24], we also train the model in three rounds.
+The training process is
+performed as follows:
+Figure 4.5: Execution flow of Semantic Searching component
+The central component of the semantic similarity determination process, which is also
+the main component trained in this pipeline, is the Sentence Transformer model. Similar
+to the approach in [24], we build this Sentence Transformer model based on Sentence-
+BERT (SBERT) [21]. As mentioned in [21], SBERT is a modification of the pretrained
+BERT network that use siamese and triplet network structures [30] to derive semantically
+meaningful sentence embeddings that can be compared using cosine-similarity.
+For a more detailed description of SBERT, SBERT adds a pooling operation to the
+output of BERT/RoBERTa to derive a fixed sized sentence embedding. There are three
+pooling strategies have been experimented listed in [21]: Using the output of the CLS-
+token, computing the mean of all output vectors (MEAN-strategy, this is the default con-
+figuration), and computing a max-over-time of the output vectors (MAX-strategy).
+In order to fine-tune BERT/RoBERTa, in [21] they create siamese and triplet networks
+[30] to update the weights such that the produced sentence embeddings are semantically
+meaningful and can be compared with cosine-similarity. Depending on the available train-
+79
+
+--- Page 81 ---
+ing dataset, the structure of the network and the objective function will be different.
+Sentence A 
+Sentence B 
+BERT 
+BERT 
+u 
+v 
+pooling 
+pooling 
+(u, v, |u-v|) 
+Softmax classifier 
+Figure 4.6: SBERT [21] architecture with classification objective function. The two BERT networks have tied
+weights (siamese network structure).
+Sentence A 
+Sentence B 
+BERT 
+BERT 
+u 
+v 
+pooling 
+pooling 
+cosine-sim(u, v) 
+-1 … 1 
+Figure 4.7: SBERT [21] architecture at inference, for example, to compute similarity scores. This architecture
+is also used with the regression objective function.
+Anchor
+Positive
+Negative
+Anchor
+Positive
+Negative
+LEARNING
+Figure 4.8: The Triplet Loss [30] minimizes the distance between an anchor and a positive, both of which have
+the same identity, and maximizes the distance between the anchor and a negative of a different identity.
+Coming back to our approach, we are not only interested in the semantic similarity
+between two individual sentences, our goal is to determine the semantic similarity between
+the query and the document. Therefore, for each chunk in each document, we will feed
+these chunks into the sentence transformer to get the corresponding embedding for the
+whole chunk, then perform a comparison using cosine similarity with the query embedding.
+Doing this for all the chunks in the document, we will get the semantic similarity score
+between the query and each chunk in the document.
+80
+
+--- Page 82 ---
+With the similarities of the individual chunks, we will combine them to get the semantic
+similarity between the query and the document. Usually, when combining, there will be
+some popular methods such as taking the average, taking the maximum, or multiplying
+all the similarities... Here, we decided to experiment the formula that was presented and
+confirmed to be the most effective in [39] as follows:
+P(rel|q, D) ≈1 −
+Y
+s∈D
+(1 −P(rel|q, s)).
+(4.7)
+with q is the query, D is the current document and s is the sentence in that document
+(in our case, s refers to a chunk of several sentences). P(rel|q, D) is the semantic similarity
+point of the query q and the document D, while P(rel|q, s) is of the query q and chunk s
+in D.
+Formula (4.7) can be understood as the semantic similarity between the query and
+the document is considered as a probability value, and in [39], they found that the most
+eﬀicient method for estimating this value is the probability of relevance to at least one
+sentence in the document. As can be seen from the formula, P(rel|q, s) can be viewed as
+the probability that a sentence s is considered relevant to the query. So 1 −P(rel|q, s)
+is also equivalent to P(¬rel|q, s), that is, the probability that a sentence s is considered
+irrelevant to the query. Multiplying the irrelevance probabilities of all sentences together
+(Q
+s∈D P(¬rel|q, s) = Q
+s∈D(1 −P(rel|q, s))) gives us P(¬rel|q, D), the probability that
+the entire document is irrelevant to the query. Now, subtracting this probability from
+1 gives us the probability that at least one sentence in the document is relevant to the
+query.
+After obtaining the semantic similarity score, similar to [24], we will combine the lexical
+similarity score with the semantic similarity score to get the final value. However, unlike
+[24], our approach will use a hidden layer with these two similarity score values as input,
+and the output will be a single value and will be passed through the sigmoid activation
+function to ensure that the final value is scaled to the range [0,1].
+Let xq,D =
+ 
+lexical_score(q, D)
+semantic_score(q, D)
+!
+∈R2 be a vector containing two values of lexical
+similarity and semantic similarity score between query q and document D, W ∈R1×2 be
+the weight matrix and b ∈R be the bias (W and b are trainable parameters), the final
+similarity score for a query with a document can be computed as follows:
+relevant_score(q, D) = sigmoid(Wxq,D + b).
+(4.8)
+The reason for the difference between our approach and [24] is that in [24], they use
+81
+
+--- Page 83 ---
+the score value directly from BM25+ for the lexical similarity score, without scaling and
+also without going through the step of combining two lists of two query types like us,
+so the BM25+ value will be much larger than the cosine similarity, which has a value
+in the range [-1,1]. As mentioned in [24] itself, combining score for ranking in previous
+work like (1 −α) ∗lexical_score + α ∗semantic_score will not work or take much
+time to fine the α, so they proposed two approaches: sqrt(BM25_score)*cos_sim and
+BM25_score*cos_sim. While in our approach, these values are all scaled to the range
+[0,1], so the hidden layer approach is more suitable as we can learn the importance of
+each similarity score value.
+Once we have the list of final similarity score between the query and each document
+selected as samples, this also marks the end of 1 round of training. The score list will be
+passed to the positive and negative sample generator (mentioned in Subsection 4.2.3), to
+select the positive and negative samples for the next round of training.
+The important point to note here is that the number of negative samples after each
+training round will decrease. Let k, k′ and k′′ be the number of negative samples of the
+first, second and third training rounds, then this triplet of values needs to satisfy the
+constraint k′′ < k′ < k. With the first training round when k is still large, there will still
+be many negative samples are high lexical similarity to queries but low semantic similarity.
+When moving to the second training round with smaller k′, the selected negative samples
+are also simultaneously have better semantic similarity to queries. In the third round
+with the smallest k′′, negative samples are really close semantic to queries. This process
+of training is expected to help the model to be able to recognize more detailed semantic
+differences and better distinguish documents that are unrelated but semantically very
+close to the query.
+For the loss function, similar to [24], we used contrastive loss [12]. Formula for this
+loss function is as follows:
+L = 1
+2y · d2 + 1
+2(1 −y) · max(0, margin −d)2,
+(4.9)
+where y is the label (1 for relevant, 0 for non-relevant), d is the distance (or dissimilarity
+score) between the predicted output and a reference value, and margin is a hyperparam-
+eter defining the minimum distance for dissimilar pairs.
+As state in [12], unlike conventional learning systems where the loss function is a sum
+over samples, the loss function here runs over pairs of samples (or in our case is pairs of
+a query and a document). As can be seen from the formula, there are two main parts
+contributing to the loss function: loss for positive pairs and loss for negative pairs.
+• With the loss for positive pairs part: Lpos = 1
+2d2, the goal is to make relevant pairs
+have distances close to 0, which corresponds to high similarity.
+82
+
+--- Page 84 ---
+• With the loss for negative pairs part: Lneg =
+1
+2 max(0, margin −d)2, the goal is
+depends on the margin:
+– If d > margin: The term max(0, margin −d)2 becomes 0, and the loss is 0,
+This means that when a non-relevant pair’s distance d exceeds the margin, it is
+considered ”distant enough,” and the loss stops penalizing it further.
+– If d ≤margin: The loss is actively penalized, increasing quadratically as the
+distance d approaches 0. This forces the model to push non-relevant streams
+further away from the relevant ones until their distances d exceeds the margin.
+As can be seen above, the margin has a significant impact in negative loss.
+Increasing the margin will
+• allow more flexibility for non-relevant pairs to be considered “distant enough”,
+• reduce penalties for dissimilar pairs unless their distances d is very close to the query
+(relevant),
+• make the model more tolerant of borderline dissimilar pairs.
+Decreasing the margin will
+• tighten the boundary for what is considered a dissimilar pair,
+• increase penalties for non-relevant pairs, even if they are moderately dissimilar (closer
+to the margin),
+• force the model to push non-relevant pairs further away, potentially at the cost of
+overfitting or instability.
+In conclusion, using this contrastive loss function with parameters like this will en-
+courage the model to learn meaningful distinctions between relevant and non-relevant
+documents for a query.
+4.3
+Proposed Model
+After presenting the execution flow of the training pipeline as well as analyzing some
+important components in detail, in this section we would like to present the model we
+propose. This model includes the components described above, and has an execution flow
+similar to the training pipeline. The general architecture and execution flow of the model
+are as follows:
+83
+
+--- Page 85 ---
+Figure 4.9: Architecture and execution flow of our proposed model
+The detail execution flow of all the steps is as follows:
+1. First, the raw query received from the user will be preprocessed to obtain a query in
+a form more suitable for the following steps. The work in this preprocessing step is
+similar to the query preprocessing step in the pipeline mentioned in Section 4.2.
+2. Next, the preprocessed query is passed through the query expansion component
+presented in Subsection 4.2.2 to obtain an extended query.
+3. Once we have the extended query, both the regular query and the extended query
+will be fed into the BM25+ formula independently, to determine the lexical similarity
+between each query and each document in the corpus. In the pipeline for the lexical
+matching presented in Subsection 4.2.3, we have a positive-negative sample generator
+component to limit the number of samples, so after the BM25+ step we only need to
+pass the entire list of documents with scores into this generator component. However,
+in the current model, since we are running the actual query with the user and not
+on the training set, we will not have this component. Therefore, to limit the number
+of documents before passing them to the Sentence Transformer, after the BM25+
+step and sorting the scores in descending order, we need to proactively pre-select the
+number of documents needed. We will choose k documents with the highest lexical
+similarity score with the normal query, and h documents with the highest score for
+the extended query.
+4. We then combine these two document lists, remove duplicate documents, and scale
+the lexical similarity score using the same method as in the pipeline, as presented in
+Subsection 4.2.3.
+5. Then, the selected documents are fed into the chunk separator component. For each
+document in the list of documents selected in the previous step, they will be divided
+into small chunks with a maximum length of each chunk (or more specifically, the
+number of tokens in each chunk) smaller than the processing limit of the trained
+Sentence Transformer model. This component is similar to the chunk separator in
+84
+
+--- Page 86 ---
+the pipeline, and the reason for this component is also the same as described in
+Section 4.2.
+6. The query and chunks for each document are then fed into the semantic searching part
+to perform semantic similarity computation. The execution flow and computation
+process is quite similar to what was described for the pipeline’s semantic searching
+component in Subsection 4.2.4. However, since we are running the actual model
+with user queries instead of labeled datasets, there is no positive-negative samples
+generator component and no need to run the model for 3 rounds. We only run it
+once to get the final similarity scores for all documents.
+7. Finally, once we have the similarity score for each document, we will now rank
+the documents in decreasing order of similarity.
+We will define a threshold
+value, and one document would be chosen if their similarity scores in range
+[max_relevant_score - relevant_threshold, max_relevant_score].
+We will
+also need to define a relevant_default_lowerbound value, the minimum simi-
+larity score required for a document to be chosen.
+If this value is higher than
+max_relevant_score - relevant_threshold, this value will be chosen as the lower
+bound instead of max_relevant_score - relevant_threshold, which helps us pre-
+vent documents with too low similarity scores from being selected.
+As a result, from a user query, we expect to get a list of documents that the model
+judges to be relevant.
+85
+
+
+================================================================================
+Chapter 5 - Model Implementation
+================================================================================
+
+--- Page 87 ---
+Chapter 5
+Model Implementation
+5.1
+Data Construction
+To implement this project, for each language, we need to construct a corpus dataset,
+as well as cross-lingual data that pairs the low-resource language with a rich-resource
+language.
+5.1.1
+Language Corpus Datasets
+To obtain the necessary data described, we used the Wikipedia dataset available on Hug-
+ging Face1, a widely-used tool for managing large datasets in machine learning projects,
+to extract the required language data.
+Wikipedia dataset containing cleaned articles of all languages, which means the mark-
+down and unwanted sections (such as references, etc.) has been stripped. The dataset is
+built from the Wikipedia dumps2 with one subset per language, each containing a single
+train split. The data fields are the same among all configurations, specifically,
+• id (str): ID of the article,
+• url (str): URL of the article,
+• title (str): Title of the article,
+• text (str): Text content of the article.
+The Vietnamese subset and Khmer subset contains about 12,000 rows and 1.29M rows
+respectively, out of 61,614,907 total rows of the whole dataset.
+To load the dataset, we utilized the datasets library, an open-source Python library
+developed by Hugging Face, designed to simplify the process of accessing, sharing, and
+1https://huggingface.co/datasets/wikimedia/wikipedia
+2https://dumps.wikimedia.org/
+86
+
+--- Page 88 ---
+working with large datasets in machine learning projects. This approach is simple because
+the dataset is also accessible on Hugging Face.
+After loading the dataset, we use the gpt-4o model to initially filter articles related
+to topics as discussed (economy documents for Vietnamese and cultural documents for
+Khmer). Then, we manually filter them once again to ensure the quality of the datasets.
+Finally, we successfully construct the Vietnamese Economic Document dataset with 2002
+entries and the Khmer Cultural Document dataset with 1983 entries.
+In the next step, we follow a similar approach as seen in [29] but with little adjustments.
+We determined that each first sentence in a document is the query, after which the title
+words are removed from it. For instance, the first sentence of the article Inflation is In-
+flation affects purchasing power, so the query becomes affects purchasing power.
+The intuition to choose the query is that the first sentence is usually a well-defined sum-
+mary of its corresponding article, and the deletion prevents the task from becoming an
+easy keyword matching task [29]. However, we also aim to observe the impact of a strange
+sentence on the model. As a result, we remove the first sentence from each document to
+create another dataset.
+All of the information is then combined into a single JSON file, configured with the
+fields
+• id (int): ID of the article,
+• url (str): URL of the article,
+• title (str): Title of the article,
+• text (str): Text content of the article,
+• query (str): Text of the query
+In conclusion, we have established 4 datasets for the further training and testing phases.
+5.1.2
+Language Corpus Datasets Visualization
+Except for the stopwords, we want to know which words appear most frequently in the
+texts. Therefore, we plot bar chart for these vocabulary words. VNCoreNLP library
+has been used to identify Vietnamese vocabulary, because Vietnamese does not simply
+use spaces to separate words (for example, tài chính is a word). Similarly, due to the
+characteristic of Khmer, the Khmer-NLTK library has been used to recognize Khmer
+vocabulary.
+87
+
+--- Page 89 ---
+Figure 5.1: Top 30 most frequent Vietnamese words without stopwords with translation
+88
+
+--- Page 90 ---
+Figure 5.2: Top 30 most frequent Khmer words without stopwords with translation
+From the chart, we can observe that the vocabularies align well with the topics we
+have identified earlier, Economics for Vietnamese documents and Culture for Khmer doc-
+uments. It demonstrates that the content is consistent with our expectations.
+89
+
+--- Page 91 ---
+Figure 5.3: Top 30 most frequent Vietnamese words without stopwords with translation
+Figure 5.4: Top 30 most frequent Khmer words without stopwords with translation
+The distribution of word counts in Vietnamese and Khmer documents reveals notable
+differences.
+For Khmer, most of the documents are very short, with a strong right-
+skew in the distribution and many entries containing fewer than 200 words. Vietnamese
+documents do not show a strong right-skewed distribution as Khmer documents. They
+instead appears more balanced, with a smoother decline. On the other hand, On the
+other hand, these distributions still share a common feature - a long tail followings.
+Nevertheless, we do not considered them as outliers, because in practice, many articles
+or documents contain a large number of words. This contributes to the diversity of the
+dataset.
+90
+
+--- Page 92 ---
+5.1.3
+Cross-lingual Dataset
+For acquiring the cross-lingual dataset, we relied on OPUS3, a growing collection of trans-
+lated texts from the web.
+OPUS offers 13 resources for Khmer-English translation. Among these, the NLLB cor-
+pus [11] [31] stands out as the largest, containing 5,863,140 sentences, 60,515,848 Khmer
+tokens, and 66,724,579 English tokens. As a result, we chose this corpus over the other
+12 resources.
+5.2
+Training Pipeline Implementation
+5.2.1
+Optimal Transport Solver
+This implementation provides a method to solve the optimal transport problem using the
+IPOT approach. As described in the Related Works chapter, this algorithm only performs
+simple matrix operations, so we used the NumPy library. Additionally, to compute the
+cost matrix, we utilized the OT library, an open source Python library provides several
+solvers for Optimal Transport problems.
+Apart from the steps mentioned in the algorithm, this implementation also supports
+warm-start initialization for eﬀicient convergence. Moreover, it offers an option (enabled
+by a boolean parameter) to track the loss progression, which allows us to detect abnor-
+malities more easily.
+5.2.2
+Knowledge Distillation Class
+This class is used to distill knowledge, specifically token embeddings, from the teacher
+sentence transformer to the student sentence transformer, which will later be used in the
+monolingual retrieval.
+The class first take in a parallel corpus of sentence pairs, one in the teacher model’s
+language and one in the student model’s language.
+Each training loop reads in one
+sentence pair from the corpus.
+The optimal transport problem is then formulated as
+described in Subsection 4.2.1. The class also provides two options for token distribution,
+the uniform distribution as in [40] and the tf −idf based distribution. After the optimal
+transport problem is defined, the Optimal Transport Solver class is used to solve for
+the transportation plan and loss. The loss is then used to update the student model’s
+parameters through backpropagation, while the transportation plan can be printed to
+track mapping of tokens between the two sentences.
+3https://opus.nlpl.eu/
+91
+
+--- Page 93 ---
+5.2.3
+Query Expansion
+The QueryExpansion class is implemented using the Expectation-Maximization (EM) al-
+gorithm to operate on document collections to extract relevant terms for query expansion.
+The implementation defines several important numerical constants:
+• LIMIT_K_DOCS_FOR_RELEVANT_SET = 10: Number of top-ranked documents used for
+expansion. If this value is too high, it will affect the speed when constructing the
+relevant set, especially if the document is long. The paper uses this number in their
+experiment, so we decide to keep it.
+• NUMBER_OF_EXPANSION_TERM = 30: Maximum number of terms to add to the origi-
+nal query. If too much terms are added, it is possible that some terms with negligible
+relevance will also be added unintentionally. The paper also uses this number in ex-
+periment, so we also not change it.
+• THRESHOLD_FOR_EM_ALGO = 0.000001:
+Convergence threshold for the EM algo-
+rithm.
+The constructor takes the input text dataset, separating the title and content into
+separate sets to be used as two source sets (collection set - title and collection set -
+content mentioned in Subsection 4.2.2) for query expansion. The class also initializes the
+collection set from all the terms that appear in the entire document set. A BM25Plus
+ranker object from the rank_bm254 library is then initialized using the entire document
+set to be used for lexical relevance-based retrieval. Three probability dictionaries (Pjk, πj
+and Zij mention in Subsection 4.2.2) are also initialized with uniform initial distributions,
+creating the necessary probability framework for the EM algorithm.
+When a new query requires expansion, the system executes a two-phase process:
+First, in the retrieval phase, any data from previous queries is cleared, and the
+BM25Plus ranker computes relevance scores between the query and all documents in the
+collection. The top LIMIT_K_DOCS_FOR_RELEVANT_SET highest-scoring documents are se-
+lected, extracts the titles and contents separately to form the remaining two source sets
+(relevant set - title and relevant set - content mention in Subsection 4.2.2).
+Next, in the expansion phase, the system applies the EM algorithm (mention in Sub-
+section 4.2.2) iteratively to both the title and content relevant terms set. The algorithm
+converges when the log likelihood change falls below the THRESHOLD_FOR_EM_ALGO, at
+which point expansion term probabilities are finalized.
+Finally, terms from the original query are filtered out, and the remaining candidates
+from both title and content sources are combined, ranked by probability, and the top
+4https://pypi.org/project/rank-bm25/
+92
+
+--- Page 94 ---
+NUMBER_OF_EXPANSION_TERM highest-scoring terms are returned as the final expansion
+set.
+5.2.4
+Lexical Matching
+The LexicalMatching class implements lexical-relevant based retrieval method using the
+BM25Plus algorithm. This component provides the list of top lexical-relevant document
+for our query.
+The initialization step begins by processing the provided document dataset to extract
+document components (titles and contents) and their corresponding identifiers from the
+dataset. For each document, the system combines its tokenized title and content to form
+a unified document representation, which then be used to initialize the BM25Plus ranker.
+The class also keeps a parallel list of document IDs that preserves the mapping between
+the internal BM25Plus document indices and their original identifiers.
+When a query requires document retrieval, we provide the tokenized query to the
+get_documents_ranking method. Then we use the BM25Plus object we initialized to
+perform BM25Plus algorithm to compute similarity scores between the query and every
+document in the collection we provided. These raw numerical scores represent the lexical
+similarity between each document and the query. We then sorts these scores in descending
+order to identify the most relevant documents. For each document in this ranked order,
+we retrieves the corresponding document identifier from the parallel ID list and pairs it
+with the document’s relevance score. The final output is a sorted list of (document_id,
+score) pairs, representing the most relevant documents for the query according to the
+lexical similarity.
+5.2.5
+Chunk Separator
+This class is designed to divide long documents into smaller, manageable chunks while
+preserving the coherence of the content.
+The main functionality of the class lies in its method to separate chunks from doc-
+uments. This method processes a single document, defined by its ID, and splits it into
+chunks based on the token length constraint. First, the document is retrieved from the
+dataset by ID, and we take the title and content in a preprocessed form (split into sen-
+tences). The sentences are processed iteratively, with a cumulative count of tokens main-
+tained to determine when a chunk exceeds the specified limit. When the limit is reached,
+the accumulated sentences are combined into a chunk and a new chunk is started. This
+ensures that each chunk remains coherent, as it consists of full sentences rather than
+arbitrary slices of text.
+93
+
+--- Page 95 ---
+5.2.6
+Custom Sentence Transformer
+Our CustomSentenceTransformer class is implemented using PyTorch to facilitate tensor
+operations and model construction, alongside the Sentence Transformer framework, which
+specializes in generating embeddings for sentences, provided by Hugging Face5.
+The Custom Sentence Transformer has a method to calculate the similarity score be-
+tween the query and a document. The method takes in the chunks of the document, which
+has been separated by the Chunk Separator component previously. Document chunks are
+processed in batches, where each batch is converted into embeddings using the document-
+specific model. The embeddings are compared to the query vector using cosine similarity.
+A ReLU activation ensures non-negative similarity values, which are further transformed
+into probabilities. The similarity scores of all chunks in a document are aggregated into
+a single score, representing the document’s overall semantic relevance to the query.
+For the forward pass, the class incorporates the “forward” method to combine semantic
+similarity with pre-computed lexical or topic similarity scores. These scores are passed
+through a linear layer followed by a sigmoid activation function to compute the final
+similarity score for each document.
+5.2.7
+Monolingual Trainer Class
+The MonolingualRetrivalTrainer class implements our proposed information retrieval
+training pipeline that combines query expansion, lexical matching, and semantic searching
+with a multi-stage training strategy to optimize document ranking performance.
+The implementation using these training parameters:
+• margin = 1.0: Controls separation between positive and negative examples in con-
+trastive loss. With this high value, dissimilar pairs must be pushed further apart
+to avoid loss, which makes the model becomes stricter about separating dissimilar
+pairs.
+• chunk_length_limit = 128: Maximum token count per document chunk, balancing
+context and eﬀiciency.
+• learning_rate = 1e-5
+• batch_size = 32
+• epochs = 4
+For the multi-stage traning step, we keep the parameters that has been used in [24]:
+5https://huggingface.co/sentence-transformers
+94
+
+--- Page 96 ---
+• FIRST_ROUND_NEGATIVE_SAMPLE_COUNT = 35: In this stage, the selected negative
+samples are high lexical similarity to queries but tend to be low in semantic similarity.
+• SECOND_ROUND_NEGATIVE_SAMPLE_COUNT = 20: These negative samples picked in
+this stage usually have better semantic similarity to queries.
+• THIRD_ROUND_NEGATIVE_SAMPLE_COUNT = 15: In this stage, negative samples cho-
+sen are really close semantic to queries.
+The train method processes batches of query-document pairs through epoch-based
+iterations, with each batch will be chosen randomly and be shuffled automatically with
+the help of DataLoader class in PyTorch to avoid overfitting. For each query-document
+pair in each batch, the method executes a training workflow:
+• Enhancement: This is the query expansion process described in Subsection 4.2.2 and
+implemented in the class QueryExpansion class.
+• Lexical
+Matching:
+Described
+in
+Subsection
+4.2.3
+and
+implemented
+in
+LexicalMatching class. Both version of the query (original and extended) are used
+to retrieve independently.
+• Positive/Negative samples generation and combining:
+From independent result
+of original and expanded queries, we get the relevant document and label it 1,
+FIRST_ROUND_NEGATIVE_SAMPLE_COUNT number of non-relevant documents and la-
+bel them 0, to form the sample list for each type of query. From these two sepearate
+list, we combine to form the final sample list.
+• Semantic Searching: We trained 3 rounds for sentence transformer describe in
+Subsection 4.2.4 and implement in CustomSentenceTransformer class.
+After training completion, the system saves:
+• The complete CustomSentenceTransformer model including the Sentence Trans-
+former model and the linear layer.
+• The CustomSentenceTransformer model part for future distillation if needed.
+5.3
+Retrieval Model Implementation
+The MonoLingualRetrival class implements a production-ready hybrid retrieval system
+that combines lexical and semantic approaches for our proposed information retrieval
+model.
+We have thoroughly described the model in Section 4.3, so in here we only mention
+about configuration parameters we have used:
+95
+
+--- Page 97 ---
+• original_query_doc_count = 30: Define how many documents should be retrived
+from the lexical-retrival phase, using the original query. The higher this number
+is, the more documents will be passed to the semantic-retrival phase, which used
+Sentence Transformer model that can be very resource-consuming. But low value
+means there is a risk of omitting the true relevant document. So we choose this num-
+ber as this is the number used in Query Expansion technique, which we considered
+appropriate for production-model too.
+• extended_query_doc_count = 30: Define how many documents should be retrived
+from the lexical-retrival phase, using the extended query. The reason we choose this
+number is similar to above.
+• relevant_threshold = 0.1:
+Maximum score difference from top document for
+inclusion.
+The documents would be chosen if their similarity scores in range
+[max_relevant_score - relevant_threshold, max_relevant_score].
+• relevant_default_lowerbound = 0.25: The minimum similarity score required
+for a document to be chosen. If this value is higher than (max_relevant_score
+- relevant_threshold), this value will be chosen as the lower bound instead of
+max_relevant_score - relevant_threshold).
+• chunk_length_limit = 128
+• batch_size = 32
+96
+
+
+================================================================================
+Chapter 6 - Experiment and Results
+================================================================================
+
+--- Page 98 ---
+Chapter 6
+Experiment and results
+6.1
+Experiment Setup
+6.1.1
+Resource
+Kaggle1 is a great AI & ML community for machine learners share, stress test, and stay
+up-to-date on all the latest ML techniques and technologies, offering access to datasets,
+notebooks, etc. For training machine learning models, GPU acceleration is essential to
+speed up computation. By utilizing Kaggle’s free GPU resources, we aim to train the
+models discussed eﬀiciently.
+Kaggle provides both GPU P100 and GPU T4x2, and we have opted for the GPU
+T4x2. The reason for this choice is its advantages in optimized for mixed-precision training
+and parallel processing capabilities. While the P100 also supports mixed-precision, the
+T4’s architecture offers improved performance in this area. Additionally, the T4x2 setup
+provides two GPUs, enabling parallelism that can further enhance training eﬀiciency.
+This dual-GPU configuration allows for larger batch sizes and more effective utilization of
+resources during model fine-tuning, particularly beneficial for transformer-based models.
+Therefore, the T4x2 setup aligns well with our computational needs and the specific
+requirements of our training tasks.
+6.1.2
+Training and Testing Phase
+For each model, we split the entire dataset into 80% for training and 20% for testing. To
+ensure the reproducibility, we set the random seed to 42, which is a popular seed number
+in machine learning.
+For training phase, after many trials and errors, we observe that training on the entire
+set takes longer than the time limit of a running session. Therefore, we have to come up
+with another idea that splitting the entire training set into several subsets and training on
+1https://www.kaggle.com/
+97
+
+--- Page 99 ---
+them one by one. This means training on the first subset, then using the results to train
+on the second subset, and so on. We conduct experiments in two conditions: one where
+the first sentence of each document is retained, with each subset having 200 samples, and
+one where the first sentences are removed, with each subset having 400 samples. The
+reason is that with our implementation, the larger the subset, the more the model shuffles
+the documents. So with larger subsets, the results are more reliable, making them more
+suitable for the more diﬀicult case without the first sentence, compared to the case with
+the first sentence.
+For testing phase, we have to use the entire language documents dataset because we
+want to retrieve among all of the documents.
+During the training phase, we only train with the processed queries as discussed in the
+previous chapter. However, in the testing phase, we test with both the prepared queries
+and the title to see if our proposed model works well in diverse cases.
+6.2
+Evaluation Metric
+In this evaluation setting, each query in our dataset is associated with only one known
+relevant (true positive) document. This constraint makes it unsuitable to apply standard
+ranking metrics such as Precision@k, Recall, or Mean Average Precision (MAP) as in [40],
+which require multiple relevant documents per query to produce meaningful scores. As a
+result, we adopt Mean Reciprocal Rank (MRR) as the primary evaluation metric, since
+it only requires the rank of the first correct result, making it appropriate for scenarios
+where only a single relevant answer is available for each query. Moreover, Accuracy@1
+(Acc@1) and Accuracy@5 (Acc@5) are also utilized to evaluate our model, to assess how
+often the correct result appears at the top or within the top 5 retrieved documents.
+The Reciprocal Rank (RR) calculates the reciprocal of the rank at which the first
+relevant document was retrieved. When averaged across queries, the measure is called
+the Mean Reciprocal Rank (MRR) [7].
+The Mean Reciprocal Rank is the average of the reciprocal ranks of results for a sample
+of queries Q
+MRR = 1
+|Q|
+|Q|
+X
+i=1
+1
+ranki
+where ranki refers to the rank position of the first relevant document for the i-th query.
+Example 6.2.1. Suppose we have the following two queries for a system. In each case,
+the system makes predictions, sorted by probability.
+Query A:
+• Proposed Results: B, C, D
+98
+
+--- Page 100 ---
+• Correct Response: D
+• Rank: 3 ⇒Reciprocal Rank:
+1
+3
+Query E:
+• Proposed Results: F, G, H
+• Correct Response: F
+• Rank: 1 ⇒Reciprocal Rank: 1
+The Mean Reciprocal Rank is calculated as 1
+2
+1
+3 + 1
+
+= 2
+3.
+6.3
+Experiment Results
+6.3.1
+Training Loss
+In this section, we want to discussed about the loss during training phases of each case
+mentioned, to give some preliminary comments about our model.
+Figure 6.1: Training loss for ‘Vietnamese with first sentence’ subsets
+In this case, the loss is generally low and consistent across subsets, especially for the
+later subsets (7 and 8), with the exception of the second and fifth subsets. Moreover, the
+results show little variation within each subset.
+99
+
+--- Page 101 ---
+Figure 6.2: Training loss for ‘Khmer with first sentence’ subsets
+In this case, the loss is higher and more scattered compared to Vietnamese, and each
+subset also shows high variation.
+Figure 6.3: Training loss for ‘Vietnamese without first sentence’ subsets
+In this case, the loss is noticeably higher and more inconsistent than in the ‘with first
+sentence’ case, with each subset also showing high variation.
+100
+
+--- Page 102 ---
+Figure 6.4: Training loss for ‘Khmer without first sentence’ subsets
+In this case, the pattern appears similar to the previous Vietnamese case.
+In summary, with these loss diagrams, we can learn some remarkable things about our
+model that the first sentence may plays a critical role, as it reduces loss and variation
+within a subset. Moreover, the training phase can be considered acceptable because the
+late subset generally give more stable and lower loss.
+6.3.2
+Final Results
+Table 6.1: Performance results
+Retrieved
+documents
+Input query
+Vietnamese
+Khmer
+MRR
+Acc@1
+Acc@5
+MRR
+Acc@1
+Acc@5
+Original
+documents
+Query
+0.9413
+0.9202
+0.9626
+0.7922
+0.7280
+0.8741
+Title
+0.8893
+0.8155
+0.9776
+0.7878
+0.7003
+0.9068
+Documents without
+first sentence
+Query
+0.5106
+0.4264
+0.6085
+0.6072
+0.5592
+0.6725
+Title
+0.8669
+0.7830
+0.9676
+0.7556
+0.6650
+0.8766
+The table shows that the retrieval models generally perform well. For Vietnamese, us-
+ing the processed query yields the highest performance with MRR of 0.9413, Accuracy@1
+of 0.9202, and Accuracy@5 of 0.9626. When using titles, the model also performs well
+with MRR of 0.8893 and a notable Accuracy@5 of 0.9776. Khmer shows slightly lower
+but still strong performance, with the query input achieving MRR of 0.7922, Accuracy@1
+of 0.7280, and Accuracy@5 of 0.8741. Using titles for Khmer gives a similar result with
+MRR of 0.7878.
+The special thing is in the documents without the first sentence. All metrics decline, the
+retrieval performance drops noticeably when using queries as input, while using titles give
+just slightly lower effectiveness. When using prepared queries as inputs for Vietnamese,
+101
+
+--- Page 103 ---
+MRR decreases 0.5106, while Accuracy@1 and Accuracy@5 drop to 0.4264 and 0.6085,
+respectively. Khmer shows a similar trend, MRR is 0.6072, Accuracy@1 is 0.5592 and
+Accuracy@1 is 0.6725. When using titles as input, for Vietnamese, MRR is still high at
+0.8669, Accuracy@1 and Accuracy@5 remains strong at 0.7830 and 0.9676, respectively.
+Khmer also achieves acceptable performance with MRR of 0.7556, Accuracy@1 of 0.6650
+and Accuracy@5 at 0.8766.
+For the explanation of these results, reviewing the datasets, we observe that there are
+some the documents are not typically written in deductive format, which means there
+is an introductory sentence at the beginning, the following supporting sentences explain
+that first sentence. Instead, the sentences in each paragraph have similar meanings, with
+no sentence being more important than the others. Therefore, if a document is written in
+this format, the query and the remaining content may share nothing in common, which
+leads to poor retrieval performance.
+About the title input, the high metrics suggest
+that the titles continue to provide suﬀicient semantic meaning within the content of the
+documents.
+102
+
+--- Page 104 ---
+Chapter 7
+Conclusion
+7.1
+Achieved Results
+Throughout this project, we have been exposed to new mathematical knowledge. We
+have grasped the definitions and properties of Topology, Measure theory and Optimal
+Transport. We were also able to prove these properties and provide specific examples to
+illustrate the concepts and properties we have learned. Furthermore, we have reviewed and
+reinforced our knowledge in the field of computer science, including Linear programming,
+Transformer, Expectation-Maximization algorithm. And by leveraging these knowledge,
+we have developed an information retrieval model capable of retrieving relevant documents
+for queries in both Khmer and Vietnamese, despite the scarcity of annotated training
+data and linguistic resources. The model uses knowledge distillation, query expansion,
+and semantic scoring to effectively retrieve relevant content. It is optimized for eﬀiciency
+and can be deployed on accessible hardware such as T4 GPUs.
+To promote transparency, we have published our project’s source code on Github1.
+This work lays the foundation for building effective retrieval systems in low-resource
+languages, providing an open-source baseline for further advancement in multilingual and
+low-resource IR research.
+7.2
+Limitations
+While the proposed system demonstrates promising results in low-resource language re-
+trieval, several limitations remain that impact its scalability and generalizability.
+First, calculating similarity scores between a query and all document chunks, presents
+a practical bottleneck. This limitation becomes more pronounced as the corpus size grows,
+restricting the model’s responsiveness in real-time applications or large-scale deployments.
+1Project repository: https://github.com/sitrongtrang/LRL-IR
+103
+
+

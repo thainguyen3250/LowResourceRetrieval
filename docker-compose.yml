@@ -1,0 +1,12 @@
+version: '1.0'
+
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - /mnt/d/lrl-ir/app
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: ["monolingual_train", "/app/documents", "/app/processed_docs", "/app/qd_dir", "path/to/pretrained_model", "True", "vie", "128", "cpu", "32", "1.0", "1e-5", "4"]

@@ -1,0 +1,9 @@
+tests/__pycache__/
+.pytest_cache/
+components/__pycache__/
+data_storage
+.env
+*.pyc
+sentence_transformer_multilingual*
+roberta_weighted
+data
